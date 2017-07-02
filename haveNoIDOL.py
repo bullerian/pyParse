@@ -4,17 +4,24 @@ FILE_NAME_SUFFIX = ".txt"
 ERROR_RETVAL = -1
 SUCCESS_RETVAL = 0
 
-Irule = [lambda x: (len(x) % 2 == 0)]
+# Rules (Yes, I use lambda instead of def. It's more convenient in this case
+EVEN_SYMBOL_COUNT = lambda x: (len(x) % 2 == 0)
+ODD_SYMBOL_COUNT = lambda x: ((len(x) % 2) == 1)
 # NOTE: istitle() gives false-negative on "I'll" or "C'mon".
 # have to break to letters and use isupper() on first letter
-Drule = [lambda x: ((len(x) % 2) == 1), lambda x: x.split()[0][0].isupper()]
+FIRST_LETTER_UPPERCASE = lambda x: x.split()[0][0].isupper()
+END_IS_LAST_WORD = lambda x: x.split()[-1].lower() == 'end'
+LEN_GT_ZERO = lambda x: len(x)
+
+Irule = [EVEN_SYMBOL_COUNT]
+Drule = [ODD_SYMBOL_COUNT, FIRST_LETTER_UPPERCASE]
 Orule = []
-Lrule = [lambda x: x.split()[-1].lower() == 'end']
+Lrule = [END_IS_LAST_WORD]
 
 receivers = [("ivan", Irule), ("dmytro", Drule), ("lesia", Lrule)]
 misfit = ("ostap", Orule)
 
-generalRules = [lambda x: len(x)]
+generalRules = [LEN_GT_ZERO]
 
 
 def sort(rawDataList, rcv, misfitRcv=None, gnrRule=None):
