@@ -1,4 +1,7 @@
 %module lext
-int openFile(const char * path);
-char* getNextLine();
-void closeFile();
+%{
+#include "lext.h"
+%}
+extern int openFile(char * path);
+extern char* getNextLine();
+extern void closeFile();

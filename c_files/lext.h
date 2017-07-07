@@ -1,5 +1,5 @@
-#ifndef LINE_EXTRACTOR_H
-#define LINE_EXTRACTOR_H
+#ifndef LEXT_H
+#define LEXT_H
 
 #include <stdio.h>
 
@@ -11,7 +11,7 @@
 #define TRUE            (!FALSE)
 
 
-int openFile(const char * path);
+int openFile(char * path);
 char* getNextLine();
 void closeFile();
 

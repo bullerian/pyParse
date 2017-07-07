@@ -1,5 +1,9 @@
 #!/bin/sh
 LIB_NAME='lext'
 
-gcc -shared -o_$LIB_NAME.so -Wall -fPIC line_extractor.c &&\
-swig -python -o "../$LIB_NAME.py" $LIB_NAME.i
+
+
+swig -python $LIB_NAME.i &&\
+gcc -fPIC -c "$LIB_NAME.c" "$LIB_NAME"'_wrap.c' -I/usr/include/python2.7 &&\
+ld -shared "$LIB_NAME.o" "$LIB_NAME"'_wrap.o' -o _"$LIB_NAME".so
+
