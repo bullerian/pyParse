@@ -4,8 +4,9 @@ import re
 import threading
 from c_files import lext
 from scapy.all import *
-from scapy.layers.inet import IP, TCP, UDP, ICMP
-
+from scapy.layers.inet import IP, UDP, ICMP
+import random
+from Queue import Queue as queue
 
 SUCCESS_RETVAL = 0
 ERROR_RETVAL = -1
@@ -25,10 +26,9 @@ Addressants_re = {"Ivasyk": (RE_EVEN_STR_LEN,),
 Missfit_addressant = 'Ostap'
 General_rule = RE_NON_WHITE_SPAC_STR
 
-Servers = {}
-
 DATAGRAM_PORT = 9000
-SNIFF_FILTER_STR = 'udp and port ' + str(DATAGRAM_PORT)
+
+THREAD_POOL_SIZE = 4
 
 
 class InputWrapper:
@@ -64,80 +64,117 @@ class InputWrapper:
         self._is_open = False
 
 
-def is_rules_apply(rules, packet):
+def is_rules_apply(rules, _packet):
     """
     Check if packet satisfies all rules
     :param rules: list of rules
-    :param packet: packet to inspect
+    :param _packet: packet to inspect
     :return: true or false
     """
-    return all(x(packet) for x in rules)
+    return all(x(_packet) for x in rules)
 
 
 class Addressant:
-    def __init__(self, name, address, payload):
+    PORT_MAXVAL = 65535
+    ERROR_RETVAL = -1
+    SUCCESS_RETVAL = 0
+
+    def __init__(self,
+                 name,
+                 address,
+                 payload,
+                 timeout,
+                 interface=None):
         self.name = name
-        self.address = address
-        self.payload = payload
+        self._id = random.randint(1, Addressant.PORT_MAXVAL)
+        self._payload = payload
+        self._ip_frame = IP(dst=address)
+        self._iface = interface
+        self._timeout = timeout
 
-    def ping(self):
-        pass
+    def _ping(self):
+        ans, unans = sr(self._ip_frame / ICMP(),
+                        iface=self._iface,
+                        timeout=self._timeout,
+                        verbose=False)
+        if unans:
+            print('Host IP:{} is not responding'.format(
+                self._ip_frame.getfieldval('dst')))
+            return self.ERROR_RETVAL
 
-    def send(self):
-        pass
+    def _send(self):
+        datagram = (self._ip_frame /
+                    UDP(dport=DATAGRAM_PORT,
+                        sport=self._id) /
+                    self._payload)
+        send(datagram, verbose=False)
+        return self._id
+
+    def start_transmit(self):
+        if self._ping() == self.ERROR_RETVAL:
+            return ERROR_RETVAL
+
+        return self._send()
 
 
-def is_all_rules_apply(packet, rules):
-    return all(re.match(pattern, packet) for pattern in rules)
-
-
-def factory(new_packet, missfit_name, general_rule):
-    addresants = []
+def factory(new_packet, missfit_name, general_rule, task_q, timeout):
+    addr_obj = []
     packet_taken = 0
     general_re = re.compile(general_rule)
 
     if not general_re.match(new_packet):
-        return addresants
+        return
 
     for name, rules in Addressants_re.items():
         if is_all_rules_apply(new_packet, rules):
             packet_taken += 1
             if name in Servers:
-                addresants.append(Addressant(name, Servers[name], new_packet))
+                addr_obj.append(Addressant(name,
+                                           Servers[name],
+                                           new_packet,
+                                           timeout=timeout))
             else:
                 print("Error adressant's name '{}' isn't present in "
                       "JSON file".format(name))
     if packet_taken == 0:
-        addresants.append(Addressant(missfit_name,
-                                     Servers[missfit_name],
-                                     new_packet))
-    return addresants
+        addr_obj.append(Addressant(missfit_name,
+                                   Servers[missfit_name],
+                                   new_packet,
+                                   timeout=timeout))
+
+    [task_q.put(obj) for obj in addr_obj]
+
+
+def is_all_rules_apply(_packet, rules):
+    return all(re.match(pattern, _packet) for pattern in rules)
 
 
 def get_servers(servers_path):
     with (open(servers_path)) as srv:
+        print("+++ Servers file loaded")
         return json.load(srv)
 
 
 class SnifferThread(threading.Thread):
-    SNIFF_TIMEOUT_SEC = 1
+    SNIFF_TIMEOUT_SEC = 4
 
     def __init__(self,
                  interface,
+                 result_q,
                  stop_event,
                  destination_port=None,
-                 tim_out=SNIFF_TIMEOUT_SEC,
+                 timeout=SNIFF_TIMEOUT_SEC,
                  name='SnifferThread'):
-
         threading.Thread.__init__(self)
         self._destination_port = destination_port
         self._iface = interface
         self.__stop_event = stop_event
-        self._sniff_tim_out = tim_out
+        self._sniff_tim_out = timeout
         self.__name = name
+        self._result_q = result_q
 
-    def __sniffed_handler(self, caught_packet):
-        caught_packet.show()
+    def _sniffed_handler(self, caught_packet):
+        self._result_q.put(caught_packet)
 
     def __filter(self, pkt):
         return UDP in pkt and pkt[UDP].dport == self._destination_port
@@ -145,49 +182,88 @@ class SnifferThread(threading.Thread):
     def run(self):
         while not self.__stop_event.isSet():
             sniff(lfilter=self.__filter,
-                  prn=self.__sniffed_handler,
+                  prn=self._sniffed_handler,
                   iface=self._iface,
                   timeout=self._sniff_tim_out)
-
-        print('SnifferThread finished successfully')
         thread.exit()
+
+
+class ThreadPool:
+    def __init__(self, task_queue, result_queue):
+        self._task_q = task_queue
+        self._result_q = result_queue
+
+    def _worker(self):
+        print("+++ Worker started")
+        while True:
+            the_addressant = self._task_q.get(timeout=0.3)
+            retval = the_addressant.start_transmit()
+            if retval > 0:
+                self._result_q.put(retval)
+                self._task_q.task_done()
+            if self._task_q.empty():
+                thread.exit()
+
+    def crate_thread_pool(self):
+        for thr_num in range(THREAD_POOL_SIZE):
+            threading.Thread(target=self._worker,
+                             name='Thread_{}'.format(thr_num)).start()
+        print("+++ Pool created")
 
 
 def main(f_args):
     global Servers
     global General_rule
     global Missfit_addressant
-    sniffer_thread = None
 
+    task_q = queue()
+    sent_q = queue()
+    sniff_q = queue()
+
+    print("+++ Started")
     packet_stream = InputWrapper(f_args.path)
-    counter = 0
-
     Servers = get_servers(f_args.servers)
 
-    sniffer_cutout = threading.Event()
-
+    sniffer_kill_event = threading.Event()
     my_sniffer = SnifferThread(INTERFACE_DEFAULT,
-                               sniffer_cutout,
-                               DATAGRAM_PORT)
-
+                               sniff_q,
+                               sniffer_kill_event,
+                               destination_port=DATAGRAM_PORT)
     my_sniffer.start()
 
-    send(IP(dst='192.168.1.1')/UDP(dport=DATAGRAM_PORT)/Raw(load='Test '
-                                                                     'string'),
-         iface=INTERFACE_DEFAULT)
+    ThreadPool(task_q, sent_q).crate_thread_pool()
 
-    sniffer_cutout.set()
+    with packet_stream:
+        for new_packet in packet_stream:
+            factory(new_packet,
+                    Missfit_addressant,
+                    General_rule,
+                    task_q,
+                    timeout=f_args.timeout)
 
-    # with packet_stream:
-    #     for new_packet in packet_stream:
-    #         addrs_list = factory(new_packet, Missfit_addressant, General_rule)
-    #         for addrs_obj in addrs_list:
-    #             counter += 1
-    #             print('{}. {}\t{}'.format(counter, addrs_obj.name,
-    #                                       addrs_obj.payload))
-    #         counter = 0
+    print("Please wait")
+    task_q.join()
+
+    print("+++ Workers are dead")
+
+    sniffed_list = []
+    sent_list = []
+
+    while not sniff_q.empty():
+        sniffed_list.append(sniff_q.get()[UDP].getfieldval('sport'))
+
+    while not sent_q.empty():
+        sent_list.append((sent_q.get()))
+
+    sniffer_kill_event.set()
+
+    s = set(sniffed_list)
+    diff = [x for x in sent_list if x not in s]
+    for unsent in diff:
+        print("Packet with id {} wasn't send".format(unsent))
 
     return SUCCESS_RETVAL
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Sort packets with regexp '
