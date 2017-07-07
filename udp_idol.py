@@ -4,13 +4,13 @@ import re
 import threading
 from c_files import lext
 from scapy.all import *
-from scapy.layers.inet import IP, TCP, UDP
+from scapy.layers.inet import IP, TCP, UDP, ICMP
 
 
 SUCCESS_RETVAL = 0
 ERROR_RETVAL = -1
 DEFAULT_TIMEOUT = 1
-DEFAULT_INTERFACE = conf.iface
+INTERFACE_DEFAULT = conf.iface
 
 RE_EVEN_STR_LEN = r"^(..)*$"
 RE_ODD_STR_LEN = r"^.(..)*$"
@@ -27,8 +27,8 @@ General_rule = RE_NON_WHITE_SPAC_STR
 
 Servers = {}
 
-DATAGRAM_PORT_STR = '9000'
-SNIFF_FILTER_STR = 'udp and port ' + DATAGRAM_PORT_STR
+DATAGRAM_PORT = 9000
+SNIFF_FILTER_STR = 'udp and port ' + str(DATAGRAM_PORT)
 
 
 class InputWrapper:
@@ -91,26 +91,26 @@ def is_all_rules_apply(packet, rules):
     return all(re.match(pattern, packet) for pattern in rules)
 
 
-def factory(packet, missfit_name, general_rule):
+def factory(new_packet, missfit_name, general_rule):
     addresants = []
     packet_taken = 0
     general_re = re.compile(general_rule)
 
-    if not general_re.match(packet):
+    if not general_re.match(new_packet):
         return addresants
 
     for name, rules in Addressants_re.items():
-        if is_all_rules_apply(packet, rules):
+        if is_all_rules_apply(new_packet, rules):
             packet_taken += 1
             if name in Servers:
-                addresants.append(Addressant(name, Servers[name], packet))
+                addresants.append(Addressant(name, Servers[name], new_packet))
             else:
                 print("Error adressant's name '{}' isn't present in "
                       "JSON file".format(name))
     if packet_taken == 0:
         addresants.append(Addressant(missfit_name,
                                      Servers[missfit_name],
-                                     packet))
+                                     new_packet))
     return addresants
 
 
@@ -118,17 +118,39 @@ def get_servers(servers_path):
     with (open(servers_path)) as srv:
         return json.load(srv)
 
-def sniffed_handler(packet):
-    pass
 
+class SnifferThread(threading.Thread):
+    SNIFF_TIMEOUT_SEC = 1
 
-def sniffer():
-    sniffer_thread = threading.Thread(target=sniff,
-                                      name='sniffer',
-                                      kwargs={'filter': SNIFF_FILTER_STR,
-                                              'prn': sniffed_handler,
-                                              'iface': DEFAULT_INTERFACE})
-    return sniffer_thread
+    def __init__(self,
+                 interface,
+                 stop_event,
+                 destination_port=None,
+                 tim_out=SNIFF_TIMEOUT_SEC,
+                 name='SnifferThread'):
+
+        threading.Thread.__init__(self)
+        self._destination_port = destination_port
+        self._iface = interface
+        self.__stop_event = stop_event
+        self._sniff_tim_out = tim_out
+        self.__name = name
+
+    def __sniffed_handler(self, caught_packet):
+        caught_packet.show()
+
+    def __filter(self, pkt):
+        return UDP in pkt and pkt[UDP].dport == self._destination_port
+
+    def run(self):
+        while not self.__stop_event.isSet():
+            sniff(lfilter=self.__filter,
+                  prn=self.__sniffed_handler,
+                  iface=self._iface,
+                  timeout=self._sniff_tim_out)
+
+        print('SnifferThread finished successfully')
+        thread.exit()
 
 
 def main(f_args):
@@ -139,23 +161,31 @@ def main(f_args):
 
     packet_stream = InputWrapper(f_args.path)
     counter = 0
+
     Servers = get_servers(f_args.servers)
 
-    sniffer_thread = sniffer()
+    sniffer_cutout = threading.Event()
 
-    #sniffer_thread.start()
+    my_sniffer = SnifferThread(INTERFACE_DEFAULT,
+                               sniffer_cutout,
+                               DATAGRAM_PORT)
 
-    tmp = IP(dst='192.168.1.100')
-    tmp.show()
+    my_sniffer.start()
 
-    with packet_stream:
-        for new_packet in packet_stream:
-            addrs_list = factory(new_packet, Missfit_addressant, General_rule)
-            for addrs_obj in addrs_list:
-                counter += 1
-                print('{}. {}\t{}'.format(counter, addrs_obj.name,
-                                          addrs_obj.payload))
-            counter = 0
+    send(IP(dst='192.168.1.1')/UDP(dport=DATAGRAM_PORT)/Raw(load='Test '
+                                                                     'string'),
+         iface=INTERFACE_DEFAULT)
+
+    sniffer_cutout.set()
+
+    # with packet_stream:
+    #     for new_packet in packet_stream:
+    #         addrs_list = factory(new_packet, Missfit_addressant, General_rule)
+    #         for addrs_obj in addrs_list:
+    #             counter += 1
+    #             print('{}. {}\t{}'.format(counter, addrs_obj.name,
+    #                                       addrs_obj.payload))
+    #         counter = 0
 
     return SUCCESS_RETVAL
 
