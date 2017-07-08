@@ -12,6 +12,8 @@ SUCCESS_RETVAL = 0
 ERROR_RETVAL = -1
 DEFAULT_TIMEOUT = 1
 INTERFACE_DEFAULT = conf.iface
+DATAGRAM_PORT = 9000
+THREAD_POOL_SIZE = 4
 
 RE_EVEN_STR_LEN = r"^(..)*$"
 RE_ODD_STR_LEN = r"^.(..)*$"
@@ -25,10 +27,7 @@ Addressants_re = {"Ivasyk": (RE_EVEN_STR_LEN,),
 
 Missfit_addressant = 'Ostap'
 General_rule = RE_NON_WHITE_SPAC_STR
-
-DATAGRAM_PORT = 9000
-
-THREAD_POOL_SIZE = 4
+Servers = {}
 
 
 class InputWrapper:
@@ -72,7 +71,7 @@ class InputWrapper:
 def is_rules_apply(rules, _packet):
     """
     Check if packet satisfies all rules
-    :param rules: list of rules
+    :param rules: tuple of rules
     :param _packet: packet to inspect
     :return: true or false
     """
@@ -267,7 +266,8 @@ class SnifferThread(threading.Thread):
     def run(self):
         """
         While self.__stop_event isn't set thread will call sniff().
-        Exits from thread when self.__stop_event is set
+        Thread exits when self.__stop_event is set and
+        SNIFF_TIMEOUT_SEC is expired
         :return: None
         """
         while not self.__stop_event.isSet():
@@ -327,9 +327,20 @@ def main(f_args):
     sent_q = queue()
     sniff_q = queue()
 
-    print("+++ Started")
-    packet_stream = InputWrapper(f_args.path)
-    Servers = get_servers(f_args.servers)
+    try:
+        packet_stream = InputWrapper(f_args.path)
+    except (OSError, IOError):
+        print("Can't open input file. Terminating.")
+        return ERROR_RETVAL
+
+    try:
+        Servers = get_servers(f_args.servers)
+    except (IOError):
+        print("Can't open servers file. Terminating.")
+        return ERROR_RETVAL
+    except (Exception):
+        print("Problems with servers file. Terminating.")
+        return ERROR_RETVAL
 
     sniffer_kill_event = threading.Event()
     my_sniffer = SnifferThread(interface=INTERFACE_DEFAULT,
@@ -350,7 +361,6 @@ def main(f_args):
 
     print("Please wait. Still processing")
     task_q.join()
-
     print("+++ Workers are dead")
 
     sniffed_list = []
@@ -364,13 +374,13 @@ def main(f_args):
 
     sniffer_kill_event.set()
 
-    s = set(sniffed_list)
-    diff = [x for x in sent_list if x not in s]
+    sniff_set = set(sniffed_list)
+    diff = [x for x in sent_list if x not in sniff_set]
 
     unsent_packets = len(diff)
     if unsent_packets:
-        for id in diff:
-            print("Packet with id {} wasn't sent".format(id))
+        for _id in diff:
+            print("Packet with id {} wasn't sent".format(_id))
     else:
         print("{} packets was successfully sent".format(len(sniffed_list)))
 
@@ -391,7 +401,8 @@ if __name__ == '__main__':
     parser.add_argument("-t",
                         '--timeout',
                         type=int,
-                        metavar='seconds',
+                        choices=range(1, 10),
+                        metavar='seconds (1-10)',
                         default=DEFAULT_TIMEOUT,
                         help="ping timeout in seconds")
 
